@@ -1,0 +1,14 @@
+version: 0.1
+os: linux
+files: 
+  - source: /target/spring-petclinic-2.7.0-SNAPSHOT.jar
+    destination: /tmp/
+hooks:
+  ApplicationStop:
+    - location: hooks/stop_application.sh
+      timeout: 300
+  ApplicationStart:
+    - location: scripts/start_application.sh
+      timeout: 300
+  ValidateService:
+    - location: scripts/health_check.sh

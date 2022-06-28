@@ -1,0 +1,361 @@
+
+Parameters:
+  ProjectName:
+    Description: Name of Project
+    Type: String
+    Default: petclinic
+  RepositoryName:
+    Description: CodeCommit Repository name
+    Type: String
+    Default: testrepository
+Resources:
+  ########################
+  #   S3 Bucket Policy   #
+  ########################
+  CodePipelineArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: "pipeline-petclinic"
+  CodePipelineArtifactStoreBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref CodePipelineArtifactStoreBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyUnEncryptedObjectUploads
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Join 
+              - ''
+              - - !GetAtt 
+                  - CodePipelineArtifactStoreBucket
+                  - Arn
+                - /*
+            Condition:
+              StringNotEquals:
+                's3:x-amz-server-side-encryption': 'aws:kms'
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: !Join 
+              - ''
+              - - !GetAtt 
+                  - CodePipelineArtifactStoreBucket
+                  - Arn
+                - /*
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  ############################
+  #   Policy CloudFormation  #
+  ############################
+  CloudformationDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole 
+  DeployPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+              - iam:GetRole
+              - iam:CreateRole
+              - iam:AttachRolePolicy
+              - iam:CreateServiceLinkedRole
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*'
+          - Effect: Allow
+            Action:
+              - s3:Get*
+              - s3:Put*
+              - s3:List*
+            Resource: 
+              - !GetAtt CodePipelineArtifactStoreBucket.Arn
+              - Fn::Sub:
+                - "${ArtifactArn}/*"
+                - ArtifactArn: !GetAtt CodePipelineArtifactStoreBucket.Arn
+          - Effect: Allow
+            Action: 
+              - cloudformation:*
+            Resource: '*'
+          - Effect: Allow 
+            Action:
+              - elasticloadbalancing:*
+            Resource: '*'
+      PolicyName: CloudformationAccessPolicy
+      Roles:
+        - !Ref CloudformationDeployRole
+  DeployEC2InstancePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: 
+              - ec2:*
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - s3:*
+            Resource: '*'
+      PolicyName: DeployEC2InstancePolicy
+      Roles:
+        - !Ref CloudformationDeployRole
+
+  ############################
+  #    Policy CodeBuild    #
+  ############################
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: '2012-10-17'
+
+  CodeBuildPolicyDefault:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PuLogEvents
+            Effect: Allow
+            Resource: '*'
+              # - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${CodeBuild}'
+              # - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${CodeBuild}:*'
+          - Action:
+              - s3:Get*
+              - s3:List*
+              - s3:DeleteObject*
+              - s3:PutObject*
+              - s3:Abort*
+            Effect: Allow
+            Resource:
+              - !GetAtt CodePipelineArtifactStoreBucket.Arn
+              - Fn::Sub: 
+                - '${ArtifactPipelineArn}/*'
+                - ArtifactPipelineArn: !GetAtt CodePipelineArtifactStoreBucket.Arn
+              - arn:aws:s3:::logs-codebuild-checking
+              - arn:aws:s3:::logs-codebuild-checking/*
+          - Effect: Allow
+            Action:
+              - codebuild:CreateReportGroup
+              - codebuild:CreateReport
+              - codebuild:UpdateReport
+              - codebuild:BatchPutTestCases
+            Resource: '*'
+      PolicyName: CodeBuildPolicyDefault
+      Roles:
+        - !Ref CodeBuildRole
+
+  PipelineCodebuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal: 
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+        Version: 2012-10-17
+  PipelineCodebuildRoleDefaultPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+              - cloudformation:ValidateTemplate
+            Resource: '*'
+      PolicyName: PipelineCodebuildRoleDefaultPolicy
+      Roles:
+        - !Ref PipelineCodebuildRole
+  
+  ############################
+  #    Policy CodeDeploy     #
+  ############################
+  CodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+
+  ############################
+  #    Policy Codepipeline   #
+  ############################
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+  CodePipelinePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: 
+              - 'codecommit:CancelUploadArchive'
+              - 'codecommit:GetBranch'
+              - 'codecommit:GetCommit'
+              - 'codecommit:GetUploadArchiveStatus'
+              - 'codecommit:UploadArchive'
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - 'codedeploy:CreateDeployment'
+              - 'codedeploy:GetApplicationRevision'
+              - 'codedeploy:GetDeployment'
+              - 'codedeploy:GetDeploymentConfig'
+              - 'codedeploy:RegisterApplicationRevision'
+            Resource: '*'
+          - Effect: Allow
+            Action: 
+              - 's3:GetObject*'
+              - 's3:GetBucket*'
+              - 's3:List*'
+              - 's3:DeleteObject*'
+              - 's3:PutObject*'
+              - 's3:Abort*'  
+            Resource: 
+              - !GetAtt CodePipelineArtifactStoreBucket.Arn
+              - !Sub
+                  - ${ArtifactPipelineArn}/*
+                  - ArtifactPipelineArn: !GetAtt CodePipelineArtifactStoreBucket.Arn
+          - Effect: Allow
+            Action:
+              - cloudformation:*
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource: '*'
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Resource:
+              - !GetAtt PipelineCodebuildRole.Arn
+              - !GetAtt CloudformationDeployRole.Arn
+        Version: 2012-10-17
+      PolicyName: CodepipelinePolicy
+      Roles:
+        - !Ref CodePipelineRole
+  
+  ############################
+  # IAM Instance EC2 Profile #
+  ############################
+  # Role used to access bucket
+  RoleEC2Server:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+  EC2ServerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: 
+              - 's3:GetObject*'
+              - 's3:GetBucket*'
+              - 's3:List*'
+              - 's3:DeleteObject*'
+              - 's3:PutObject*'
+              - 's3:Abort*'  
+            Resource: 
+              - !GetAtt CodePipelineArtifactStoreBucket.Arn
+              - !Sub
+                  - ${ArtifactPipelineArn}/*
+                  - ArtifactPipelineArn: !GetAtt CodePipelineArtifactStoreBucket.Arn
+      PolicyName: EC2AccessBucketDeployment
+      Roles: !Ref RoleEC2Server
+  IamEC2Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref RoleEC2Server
+      InstanceProfileName: EC2AccessBucketProfile
+  
+
+Outputs:
+  ArtifactPipelineId:
+    Description: Id of S3 bucket Artifact
+    Value: !Ref CodePipelineArtifactStoreBucket
+    Export: 
+      Name: "ArtifactPipelineId"
+  ArtifactPipelineArn:
+    Description: S3 bucket artifact used in pipeline 
+    Value: !GetAtt CodePipelineArtifactStoreBucket.Arn
+    Export:
+      Name: "ArtifactPipelineArn"
+  CloudformationDeployRoleArn:
+    Description: Role use for cloudformation deploy
+    Value: !GetAtt CloudformationDeployRole.Arn
+    Export:
+      Name: !Sub "DeployRole-${ProjectName}"
+  CodePipelineRoleArn:
+    Description: CodePipeline Role Arn 
+    Value: !GetAtt CodePipelineRole.Arn
+    Export:
+      Name: "CodePipelineRoleArn"
+  PipelineCodebuildRoleArn:
+    Description: Pipeline Codebuild Role Arn
+    Value: !GetAtt PipelineCodebuildRole.Arn
+    Export:
+      Name: "PipelineCodebuildRoleArn"
+  CodeBuildRoleArn:
+    Description: CodeBuild Role Arn
+    Value: !GetAtt CodeBuildRole.Arn
+    Export:
+      Name: "CodeBuildRoleArn"
+  CodeDeployRoleArn:
+    Description: Codedeploy Role Arn
+    Value: !GetAtt CodeDeployRole.Arn
+    Export:
+      Name: "CodeDeployRoleArn"
+  NameIamEC2Profile:
+    Description: Name of EC2 Instance Profile
+    Value: !Ref IamEC2Profile
+    Export:
+      Name: "IamInstanceProfileAccessS3"

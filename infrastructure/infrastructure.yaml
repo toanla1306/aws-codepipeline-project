@@ -1,0 +1,65 @@
+Parameters:
+  ProjectName:
+    Type: String 
+    Description: Name of project
+    Default: petclinic
+  EnvironmentName:
+    Type: String 
+    Description: Name in tag use for Network setting 
+    Default: NetworkProject
+  VpcCIDR:
+    Type: String 
+    Description: CIDR of VPC 
+    Default: 10.0.0.0/16
+  PublicSubnet1CIDR:
+    Type: String 
+    Description: CIDR Public Subnet 1
+    Default: 10.0.30.0/24
+  PublicSubnet2CIDR:
+    Type: String 
+    Description: CIDR Public Subnet 2
+    Default: 10.0.30.0/24
+  PrivateSubnet1CIDR:
+    Type: String 
+    Description: CIDR Private Subnet 1
+    Default: 10.0.30.0/24
+  PrivateSubnet2CIDR:
+    Type: String 
+    Description: CIDR Private Subnet 2
+    Default: 10.0.30.0/24
+  ImageId:
+    Type: String 
+    Description: Image Id 
+    Default: ami-0cff7528ff583bf9a
+  InstanceType:
+    Type: String
+    Description: Type of Instance 
+    Default: t2.micro
+  VolumeSize:
+    Type: String
+    Description: Volume Size
+    Default: '8'
+
+Resources:
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: network/network.yaml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VpcCIDR: !Ref VpcCIDR
+        PublicSubnet1CIDR: !Ref PublicSubnet1CIDR
+        PublicSubnet2CIDR: !Ref PublicSubnet2CIDR
+        PrivateSubnet1CIDR: !Ref PrivateSubnet1CIDR
+        PrivateSubnet2CIDR: !Ref PrivateSubnet2CIDR
+  ServerEC2Instance:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: server/ec2.yaml
+      Parameters:
+        VpcId: !GetAtt Network.Outputs.VpcID
+        ImageId: !Ref ImageId 
+        InstanceType: !Ref InstanceType
+        VolumeSize: !Ref VolumeSize
+        SubnetPublic1: !GetAtt Network.Outputs.PublicSubnet1
+        SubnetPublic2: !GetAtt Network.Outputs.PublicSubnet2

@@ -1,0 +1,222 @@
+
+Parameters:
+  BranchName: 
+    Description: CodeCommite branch name
+    Type: String
+    Default: master
+  RepositoryName:
+    Description: CodeCommit Repository name
+    Type: String
+    Default: testrepository
+  ApplicationName:
+    Description: CodeDeploy application name
+    Type: String
+    Default: DemoApplication
+  BetaFleet:
+    Description: Fleet configured in CodeDeploy
+    Type: String
+    Default: DemoFleet
+  CodeBuildType:
+    Type: String
+    Default: LINUX_CONTAINER
+  ImageType:
+    Type: String
+    Default: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+  ComputeType:
+    Type: String
+    Default: BUILD_GENERAL1_SMALL
+  PrivilegedModeType:
+    Type: String
+    Default: 'true'
+  ProjectName:
+    Description: Name of Project
+    Type: String
+    Default: petclinic
+  
+Resources:
+  ##########################
+  #  CloudWatch Event Rule #
+  ##########################
+  AmazonCloudWatcEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement: 
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'codepipeline:StartPipelineExecution'
+                Resource: !Join 
+                      - ''
+                      - - 'arn:aws:codepipeline:'
+                        - !Ref 'AWS::Region'
+                        - ':'
+                        - !Ref 'AWS::AccountId'
+                        - ':'
+                        - !Ref AppPipeline
+
+  AmazonCloudWatchRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources: 
+          - !Sub 'arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}'
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - master
+      Targets:
+        - Arn: !Join 
+            - ''
+            - - 'arn:aws:codepipeline:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref AppPipeline
+          RoleArn: !GetAtt AmazonCloudWatcEventRole.Arn
+          Id: codepipeline-AppPipeline
+
+  ############################
+  #    CodeBuild Resource    #
+  ############################
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE 
+      Environment:
+        Type: !Ref CodeBuildType
+        Image: !Ref ImageType
+        ComputeType: !Ref ComputeType
+        PrivilegedMode: !Ref PrivilegedModeType
+      ServiceRole: !ImportValue  CodeBuildRoleArn
+      Source:
+        BuildSpec: ./automation/buildspec.yaml
+        Type: CODEPIPELINE 
+      LogsConfig:
+        S3Logs:
+          EncryptionDisabled: false
+          Location: arn:aws:s3:::logs-codebuild-checking 
+          Status: ENABLED
+
+  ############################
+  #    CodeDeploy Resource   #
+  ############################
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: codedeploy-pipeline
+      ComputePlatform: Server
+  
+  CodeDeployGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      Ec2TagFilters:
+        - Key: 'TagKey'
+          Value: 'TagValue'
+          Type: KEY_AND_VALUE
+      ServiceRoleArn: !ImportValue 'CodeDeployRoleArn'
+  
+  ############################
+  #   CodePipeline Resource  #
+  ############################
+  AppPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: codecommit-events-pipeline
+      RoleArn: !ImportValue CodePipelineRoleArn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                BranchName: !Ref BranchName
+                RepositoryName: !Ref RepositoryName
+                PollForSourceChanges: false
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: OutputFromCodeBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuild
+                EnvironmentVariables: 
+                  Fn::Sub: 
+                    - '[{"name":"BUCKET_NAME","value":"${ArtifactPipelineId}","type":"PLAINTEXT"}]'
+                    - ArtifactPipelineId: !ImportValue ArtifactPipelineId
+              # OutputArtifacts:
+              #   - Name: CodeBuildOutput
+              RoleArn: !ImportValue PipelineCodebuildRoleArn
+              RunOrder: 1
+        # - Name: Deploy-Infra-QA
+        #   Actions:
+        #     - Name: Deploy-Infra
+        #       InputArtifacts:
+        #         - Name: OutputFromCodeBuild
+        #       OutputArtifacts: []
+        #       ActionTypeId:
+        #         Category: Deploy
+        #         Owner: AWS
+        #         Provider: CloudFormation
+        #         Version: 1
+        #       Configuration:
+        #         ActionMode: CREATE_UPDATE
+        #         Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+        #         StackName: deploy-infra-qa
+        #         RoleArn: !ImportValue 
+        #             Fn::Sub: "DeployRole-${ProjectName}"
+        #         TemplateConfiguration: OutputFromCodeBuild::infrastructure/config/config.conf
+        #         TemplatePath: OutputFromCodeBuild::template.yaml
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CodeDeploy
+              Configuration:
+                ApplicationName: !Ref CodeDeployApplication
+                DeploymentGroupName: !Ref CodeDeployGroup
+              InputArtifacts:
+                - Name: OutputFromCodeBuild
+              OutputArtifacts: []
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: !ImportValue ArtifactPipelineId
